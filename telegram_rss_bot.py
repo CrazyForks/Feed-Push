@@ -570,8 +570,8 @@ async def check_new_posts(context):
                             
                             # 关键词匹配的消息格式
                             message_text = (
-                                f"🎯 *关键词匹配*\n"
-                                f"{'─' * 25}\n"
+                                f"🎯 *RSS捕获到目标啦*\n"
+                                f"{'─' * 15}\n"
                                 f"📰 *{title}*\n\n"
                                 f"匹配规则：`{escape_markdown(matched_keyword, version=2)}`\n"
                                 f"🌐 {escape_markdown(source_name, version=2)}\n"
@@ -606,8 +606,8 @@ async def check_new_posts(context):
                                     display_pattern = display_pattern[:27] + "..."
                                 
                                 message_text = (
-                                    f"🔍 *正则匹配*\n"
-                                    f"{'─' * 25}\n"
+                                    f"🔍 *RSS捕获到目标啦*\n"
+                                    f"{'─' * 15}\n"
                                     f"📰 *{title}*\n\n"
                                     f"匹配规则：`{escape_markdown(display_pattern, version=2)}`\n"
                                     f"🌐 {escape_markdown(source_name, version=2)}\n"
