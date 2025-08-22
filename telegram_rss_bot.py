@@ -754,6 +754,14 @@ async def help_command(update, context):
 
 # 主函数
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("错误：未设置 TELEGRAM_BOT_TOKEN 环境变量")
+        return
+    
+    if not ROOT_ID:
+        print("错误：未设置 ROOT_ID 环境变量")
+        return
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(20).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -770,9 +778,10 @@ def main():
     application.add_handler(CommandHandler("add_regex", add_regex))
     application.add_handler(CommandHandler("rm_regex", rm_regex))
 
-    application.job_queue.run_repeating(check_new_posts, interval=300, first=0)
+    # 使用环境变量中的更新间隔
+    application.job_queue.run_repeating(check_new_posts, interval=UPDATE_INTERVAL, first=0)
 
+    print(f"Bot 启动成功，更新间隔：{UPDATE_INTERVAL} 秒")
     application.run_polling()
-
 if __name__ == "__main__":
     main()
