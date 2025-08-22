@@ -1,5 +1,6 @@
 from telegram.ext import Application, CommandHandler
 from telegram.helpers import escape_markdown
+from datetime import datetime
 import feedparser
 import requests
 import os
@@ -21,7 +22,6 @@ UPDATE_INTERVAL = int(os.getenv('UPDATE_INTERVAL', 300))
 # 确保数据目录存在
 os.makedirs('data', exist_ok=True)
 
-ENABLE_GROUP_VERIFY = False  # 控制是否开启进群验证
 
 # 加载白名单
 def load_allowed_users():
@@ -247,31 +247,6 @@ async def list_source(update, context):
     await update.message.reply_text(response)
 
 
-def create_regex_pattern(pattern_str):
-    # 处理简单关键词
-    if not any(c in pattern_str for c in "+-"):
-        return f".*{re.escape(pattern_str)}.*"
-
-    # 处理复杂模式
-    parts = pattern_str.split("+")
-    positive_patterns = []
-    negative_patterns = []
-
-    for part in parts:
-        if not part:
-            continue
-        if "-" in part:
-            neg_parts = part.split("-")
-            if neg_parts[0]:  # 如果有正向匹配部分
-                positive_patterns.append(f"(?=.*{re.escape(neg_parts[0])})")
-            for neg_part in neg_parts[1:]:
-                if neg_part:
-                    negative_patterns.append(f"(?!.*{re.escape(neg_part)})")
-        else:
-            positive_patterns.append(f"(?=.*{re.escape(part)})")
-
-    return "^" + "".join(negative_patterns + positive_patterns) + ".*$"
-
 def validate_regex(pattern):
     try:
         re.compile(pattern)
@@ -280,6 +255,7 @@ def validate_regex(pattern):
         return False, str(e)
     
 # 添加关键词到特定 RSS 源
+# 智能添加函数（只支持简写版本）
 async def add(update, context):
     user_id = update.effective_user.id
     if not await is_user_in_group(user_id, context):
@@ -292,16 +268,22 @@ async def add(update, context):
 
     chat_id = str(update.effective_chat.id)
     user_data = load_user_data()
-    if len(context.args) < 2 or not context.args[0].isdigit():
+    
+    if len(context.args) < 3 or not context.args[0].isdigit():
         await update.message.reply_text(
-            "请提供一个源编号和关键词，例如：\n"
-            "/add 1 dmit 添加单个关键词\n"
-            "/add 1 dmit vps hosting 添加多个关键词\n"
-            "/add 1 +A+B-C +X-Y 添加多个复杂规则\n\n"
-            "格式说明：\n"
-            "+A+B 表示必须同时包含A和B\n"
-            "+A-B 表示必须包含A但不能包含B\n"
-            "多个关键词用空格分隔")
+            "请提供源编号、类型和内容，例如：\n\n"
+            "📝 **添加关键词：**\n"
+            "/add 1 k dmit 添加单个关键词\n"
+            "/add 1 k vps hosting 添加多个关键词\n\n"
+            "🔍 **添加正则表达式：**\n"
+            "/add 1 r \\d+GB 匹配数字+GB\n"
+            "/add 1 r (VPS|服务器) 匹配VPS或服务器\n"
+            "/add 1 r ^优惠.*VPS$ 以优惠开头VPS结尾\n\n"
+            "**支持的类型：**\n"
+            "• k（关键词）\n"
+            "• r（正则表达式）\n\n"
+            "💡 **提示：**\n"
+            "简单匹配用 k，复杂匹配用 r")
         return
 
     rss_index = int(context.args[0]) - 1
@@ -309,38 +291,73 @@ async def add(update, context):
         await update.message.reply_text("无效的源编号，请检查已添加的 RSS 源。")
         return
 
+    # 解析添加类型（只支持简写）
+    add_type = context.args[1].lower()
+    if add_type not in ['k', 'r']:
+        await update.message.reply_text(
+            "无效的添加类型，请使用：\n"
+            "k（添加关键词）\n"
+            "r（添加正则表达式）")
+        return
+
     # 确保必要的字段存在
     if "keywords" not in user_data[chat_id]["rss_sources"][rss_index]:
         user_data[chat_id]["rss_sources"][rss_index]["keywords"] = []
     if "regex_patterns" not in user_data[chat_id]["rss_sources"][rss_index]:
         user_data[chat_id]["rss_sources"][rss_index]["regex_patterns"] = []
+    if "regex_keywords" not in user_data[chat_id]["rss_sources"][rss_index]:
+        user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"] = []
 
-    # 获取所有关键词（除了第一个参数，即源编号）
-    patterns = context.args[1:]
-    added_keywords = []
+    # 根据类型执行不同的添加操作
+    if add_type == 'k':
+        # 添加关键词
+        patterns = context.args[2:]
+        added_keywords = []
 
-    for pattern in patterns:
-        pattern = pattern.lower().strip()
-        if pattern:  # 确保不是空字符串
-            user_data[chat_id]["rss_sources"][rss_index]["keywords"].append(pattern)
-            regex_pattern = create_regex_pattern(pattern)
-            user_data[chat_id]["rss_sources"][rss_index]["regex_patterns"].append(regex_pattern)
-            added_keywords.append(pattern)
+        for pattern in patterns:
+            pattern = pattern.lower().strip()
+            if pattern:  # 确保不是空字符串
+                user_data[chat_id]["rss_sources"][rss_index]["keywords"].append(pattern)
+                # 简化的正则模式，只做简单的包含匹配
+                simple_regex = f".*{re.escape(pattern)}.*"
+                user_data[chat_id]["rss_sources"][rss_index]["regex_patterns"].append(simple_regex)
+                added_keywords.append(pattern)
 
-    save_user_data(user_data)
+        save_user_data(user_data)
 
-    # 显示添加后的完整关键词列表
-    keywords = user_data[chat_id]["rss_sources"][rss_index]["keywords"]
-    keyword_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(keywords))
+        # 显示结果
+        keywords = user_data[chat_id]["rss_sources"][rss_index]["keywords"]
+        keyword_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(keywords))
 
-    added_summary = "\n".join(f"• {kw}" for kw in added_keywords)
-    await update.message.reply_text(
-        f"已添加以下关键词到源 {rss_index + 1}：\n{added_summary}\n\n"
-        f"当前的完整关键词列表：\n{keyword_list}"
-    )
+        added_summary = "\n".join(f"• {kw}" for kw in added_keywords)
+        await update.message.reply_text(
+            f"✅ 已添加以下关键词到源 {rss_index + 1}：\n{added_summary}\n\n"
+            f"📝 当前的完整关键词列表：\n{keyword_list}")
 
+    elif add_type == 'r':
+        # 添加正则表达式
+        regex_pattern = " ".join(context.args[2:])
+        
+        # 验证正则表达式
+        is_valid, error_msg = validate_regex(regex_pattern)
+        if not is_valid:
+            await update.message.reply_text(f"❌ 正则表达式语法错误：{error_msg}\n请检查您的正则表达式语法。")
+            return
+
+        # 添加正则表达式
+        user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"].append(regex_pattern)
+        save_user_data(user_data)
+
+        # 显示结果
+        regex_keywords = user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"]
+        regex_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(regex_keywords))
+
+        await update.message.reply_text(
+            f"✅ 已添加正则表达式到源 {rss_index + 1}：\n• {regex_pattern}\n\n"
+            f"🔍 当前的正则表达式列表：\n{regex_list}")
 
 # 删除特定 RSS 源的关键词
+# 智能删除函数（只支持简写版本）
 async def rm(update, context):
     user_id = update.effective_user.id
     if not await is_user_in_group(user_id, context):
@@ -354,11 +371,13 @@ async def rm(update, context):
     chat_id = str(update.effective_chat.id)
     user_data = load_user_data()
 
-    if len(context.args) < 2 or not context.args[0].isdigit():
+    if len(context.args) < 3 or not context.args[0].isdigit():
         await update.message.reply_text(
-            "请提供源编号和要删除的关键词序号，例如：\n"
-            "/rm 1 2 删除单个关键词\n"
-            "/rm 1 1 2 3 删除多个关键词")
+            "请提供源编号、类型和要删除的序号，例如：\n"
+            "/rm 1 k 2 删除关键词\n"
+            "/rm 1 r 1 删除正则表达式\n"
+            "/rm 1 k 1 2 3 删除多个关键词\n\n"
+            "支持的类型：k（关键词）、r（正则表达式）")
         return
 
     rss_index = int(context.args[0]) - 1
@@ -366,72 +385,99 @@ async def rm(update, context):
         await update.message.reply_text("无效的源编号，请检查已添加的 RSS 源。")
         return
 
-    # 获取要删除的索引列表并排序（从大到小）
+    # 解析删除类型（只支持简写）
+    delete_type = context.args[1].lower()
+    if delete_type not in ['k', 'r']:
+        await update.message.reply_text(
+            "无效的删除类型，请使用：\n"
+            "k（删除关键词）\n"
+            "r（删除正则表达式）")
+        return
+
+    # 获取要删除的索引列表
     try:
-        indices = sorted([int(idx) - 1 for idx in context.args[1:]], reverse=True)
+        indices = sorted([int(idx) - 1 for idx in context.args[2:]], reverse=True)
     except ValueError:
-        await update.message.reply_text("请提供有效的关键词序号")
+        await update.message.reply_text("请提供有效的序号")
         return
 
     rss_source = user_data[chat_id]["rss_sources"][rss_index]
 
-    # 首先同步 regex_patterns 和 keywords 的长度
-    current_keywords = rss_source.get("keywords", [])
-    current_patterns = rss_source.get("regex_patterns", [])
+    # 根据类型执行不同的删除操作
+    if delete_type == 'k':
+        # 删除关键词
+        current_keywords = rss_source.get("keywords", [])
+        current_patterns = rss_source.get("regex_patterns", [])
 
-    # 确保 regex_patterns 和 keywords 长度一致
-    while len(current_patterns) < len(current_keywords):
-        kw = current_keywords[len(current_patterns)]
-        if not any(c in kw for c in "+-"):
-            current_patterns.append(f".*{kw}.*")
+        if not current_keywords:
+            await update.message.reply_text("当前没有可删除的关键词")
+            return
+
+        # 验证索引
+        if any(idx < 0 or idx >= len(current_keywords) for idx in indices):
+            current_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(current_keywords))
+            await update.message.reply_text(
+                f"存在无效的关键词序号。当前的关键词列表：\n{current_list}")
+            return
+
+        # 执行删除
+        removed_keywords = [current_keywords[i] for i in sorted(indices)]
+        
+        # 删除关键词和对应的正则模式
+        for idx in indices:
+            if idx < len(current_keywords):
+                current_keywords.pop(idx)
+            if idx < len(current_patterns):
+                current_patterns.pop(idx)
+
+        # 更新数据
+        rss_source["keywords"] = current_keywords
+        rss_source["regex_patterns"] = current_patterns
+        save_user_data(user_data)
+
+        # 显示结果
+        if not current_keywords:
+            updated_list = "当前没有关键词"
         else:
-            current_patterns.append(create_regex_pattern(kw))
+            updated_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(current_keywords))
 
-    current_patterns = current_patterns[:len(current_keywords)]
-
-    if not current_keywords:
-        await update.message.reply_text("当前没有可删除的关键词")
-        return
-
-    # 验证所有索引是否有效
-    if any(idx < 0 or idx >= len(current_keywords) for idx in indices):
-        current_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(current_keywords))
+        removed_summary = "\n".join(f"• {kw}" for kw in removed_keywords)
         await update.message.reply_text(
-            f"存在无效的关键词序号。当前的关键词列表：\n{current_list}")
-        return
+            f"✅ 已删除以下关键词：\n{removed_summary}\n\n"
+            f"📝 当前的关键词列表：\n{updated_list}")
 
-    # 记录要删除的关键词
-    removed_keywords = []
+    elif delete_type == 'r':
+        # 删除正则表达式
+        current_regex = rss_source.get("regex_keywords", [])
 
-    # 创建新的列表，排除要删除的索引
-    new_keywords = []
-    new_patterns = []
+        if not current_regex:
+            await update.message.reply_text("当前没有可删除的正则表达式")
+            return
 
-    for i in range(len(current_keywords)):
-        if i in indices:
-            removed_keywords.append(current_keywords[i])
+        # 验证索引
+        if any(idx < 0 or idx >= len(current_regex) for idx in indices):
+            current_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(current_regex))
+            await update.message.reply_text(
+                f"存在无效的正则表达式序号。当前的正则表达式列表：\n{current_list}")
+            return
+
+        # 执行删除
+        removed_regex = [current_regex[i] for i in sorted(indices)]
+        for idx in indices:
+            current_regex.pop(idx)
+
+        save_user_data(user_data)
+
+        # 显示结果
+        if not current_regex:
+            updated_list = "当前没有正则表达式"
         else:
-            new_keywords.append(current_keywords[i])
-            new_patterns.append(current_patterns[i])
+            updated_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(current_regex))
 
-    # 更新源数据
-    rss_source["keywords"] = new_keywords
-    rss_source["regex_patterns"] = new_patterns
-
-    # 保存更新后的数据
-    save_user_data(user_data)
-
-    # 显示删除后的关键词列表
-    if not new_keywords:
-        updated_list = "当前没有关键词"
-    else:
-        updated_list = "\n".join(f"{i + 1}. {kw}" for i, kw in enumerate(new_keywords))
-
-    removed_summary = "\n".join(f"• {kw}" for kw in removed_keywords)
-    await update.message.reply_text(
-        f"已删除以下关键词：\n{removed_summary}\n\n"
-        f"当前的关键词列表：\n{updated_list}"
-    )
+        removed_summary = "\n".join(f"• {regex}" for regex in removed_regex)
+        await update.message.reply_text(
+            f"✅ 已删除以下正则表达式：\n{removed_summary}\n\n"
+            f"🔍 当前的正则表达式列表：\n{updated_list}")
 
 
 # 删除指定 RSS 订阅源
@@ -469,7 +515,6 @@ async def check_new_posts(context):
     cached_guids = load_cache()
     user_data = load_user_data()
 
-    # 定义请求头
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
         "Accept": "application/rss+xml, application/xml, text/xml",
@@ -483,11 +528,10 @@ async def check_new_posts(context):
             rss_url = rss["url"]
 
             try:
-                # 使用 requests 获取 RSS 数据
                 print(f"Fetching RSS: {rss_url}")
                 response = requests.get(rss_url, headers=headers, timeout=10)
-                response.raise_for_status()  # 如果请求出错则抛出异常
-                feed = feedparser.parse(response.content)  # 使用 feedparser 解析响应内容
+                response.raise_for_status()
+                feed = feedparser.parse(response.content)
             except requests.RequestException as e:
                 print(f"Failed to fetch RSS: {rss_url}. Error: {e}")
                 continue
@@ -505,21 +549,42 @@ async def check_new_posts(context):
                 raw_title = entry.title.lower()
                 title = escape_markdown(entry.title, version=2)
                 link = escape_markdown(entry.link, version=2)
+                
+                # 获取RSS源的简短名称
+                source_name = rss_url.replace('https://', '').replace('http://', '').split('/')[0]
+                current_time = datetime.now().strftime('%H:%M:%S')
 
-                # 标记是否已经匹配并发送
                 message_sent = False
+                matched_keyword = None
 
-                # 使用正则表达式匹配（普通关键词生成的正则）
+                # 检查普通关键词匹配
+                keywords = rss.get("keywords", [])
                 regex_patterns = rss.get("regex_patterns", [])
-                for pattern in regex_patterns:
+                
+                for i, pattern in enumerate(regex_patterns):
                     try:
                         if re.search(pattern, raw_title, re.IGNORECASE):
+                            # 获取对应的关键词
+                            if i < len(keywords):
+                                matched_keyword = keywords[i]
+                            
+                            # 关键词匹配的消息格式
+                            message_text = (
+                                f"🎯 *关键词匹配*\n"
+                                f"{'─' * 25}\n"
+                                f"📰 *{title}*\n\n"
+                                f"匹配规则：`{escape_markdown(matched_keyword, version=2)}`\n"
+                                f"🌐 {escape_markdown(source_name, version=2)}\n"
+                                f"🕐 {current_time}\n\n"
+                                f"[🔗 查看全文]({link})"
+                            )
+                            
                             await context.bot.send_message(
                                 chat_id=chat_id,
-                                text=f"*{title}*\n\n[查看详情]({link})",
+                                text=message_text,
                                 parse_mode="MarkdownV2",
                             )
-                            print(f"Message sent to {chat_id}: {raw_title}")
+                            print(f"Message sent to {chat_id}: {raw_title} (matched keyword: {matched_keyword})")
 
                             cached_guids.add(guid)
                             save_cache(cached_guids)
@@ -534,9 +599,25 @@ async def check_new_posts(context):
                     for regex_pattern in regex_keywords:
                         try:
                             if re.search(regex_pattern, raw_title, re.IGNORECASE):
+                                # 正则匹配的消息格式
+                                # 如果正则表达式太长，截断显示
+                                display_pattern = regex_pattern
+                                if len(display_pattern) > 30:
+                                    display_pattern = display_pattern[:27] + "..."
+                                
+                                message_text = (
+                                    f"🔍 *正则匹配*\n"
+                                    f"{'─' * 25}\n"
+                                    f"📰 *{title}*\n\n"
+                                    f"匹配规则：`{escape_markdown(display_pattern, version=2)}`\n"
+                                    f"🌐 {escape_markdown(source_name, version=2)}\n"
+                                    f"🕐 {current_time}\n\n"
+                                    f"[🔗 查看全文]({link})"
+                                )
+                                
                                 await context.bot.send_message(
                                     chat_id=chat_id,
-                                    text=f"*{title}*\n\n[查看详情]({link})",
+                                    text=message_text,
                                     parse_mode="MarkdownV2",
                                 )
                                 print(f"Message sent to {chat_id}: {raw_title} (matched regex: {regex_pattern})")
@@ -558,122 +639,7 @@ def save_cache(cache):
         for guid in cache:
             f.write(f"{guid}\n")
 
-# 添加正则表达式关键词
-async def add_regex(update, context):
-    user_id = update.effective_user.id
-    if not await is_user_in_group(user_id, context):
-        await update.message.reply_text("官方群组：https://t.me/youdaolis")
-        return
 
-    if not is_allowed_user(user_id):
-        await update.message.reply_text("抱歉，您没有权限使用此 Bot。")
-        return
-
-    chat_id = str(update.effective_chat.id)
-    user_data = load_user_data()
-    if len(context.args) < 2 or not context.args[0].isdigit():
-        await update.message.reply_text(
-            "请提供源编号和正则表达式，例如：\n"
-            "/add_regex 1 \\d+GB 匹配包含数字+GB的内容\n"
-            "/add_regex 1 (VPS|服务器) 匹配包含VPS或服务器的内容\n"
-            "/add_regex 1 ^优惠.* 匹配以'优惠'开头的内容\n\n"
-            "注意：请确保正则表达式语法正确")
-        return
-
-    rss_index = int(context.args[0]) - 1
-    if chat_id not in user_data or rss_index >= len(user_data[chat_id]["rss_sources"]):
-        await update.message.reply_text("无效的源编号，请检查已添加的 RSS 源。")
-        return
-
-    # 确保字段存在
-    if "regex_keywords" not in user_data[chat_id]["rss_sources"][rss_index]:
-        user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"] = []
-
-    # 获取正则表达式
-    regex_pattern = " ".join(context.args[1:])
-    
-    # 验证正则表达式
-    is_valid, error_msg = validate_regex(regex_pattern)
-    if not is_valid:
-        await update.message.reply_text(f"正则表达式语法错误：{error_msg}\n请检查您的正则表达式语法。")
-        return
-
-    # 添加正则表达式
-    user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"].append(regex_pattern)
-    save_user_data(user_data)
-
-    # 显示结果
-    regex_keywords = user_data[chat_id]["rss_sources"][rss_index]["regex_keywords"]
-    regex_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(regex_keywords))
-
-    await update.message.reply_text(
-        f"已添加正则表达式到源 {rss_index + 1}：\n• {regex_pattern}\n\n"
-        f"当前的正则表达式列表：\n{regex_list}"
-    )
-
-# 删除正则表达式关键词
-async def rm_regex(update, context):
-    user_id = update.effective_user.id
-    if not await is_user_in_group(user_id, context):
-        await update.message.reply_text("官方群组：https://t.me/youdaolis")
-        return
-
-    if not is_allowed_user(user_id):
-        await update.message.reply_text("抱歉，您没有权限使用此 Bot。")
-        return
-
-    chat_id = str(update.effective_chat.id)
-    user_data = load_user_data()
-
-    if len(context.args) < 2 or not context.args[0].isdigit():
-        await update.message.reply_text(
-            "请提供源编号和要删除的正则表达式序号，例如：\n"
-            "/rm_regex 1 2 删除单个正则表达式\n"
-            "/rm_regex 1 1 2 3 删除多个正则表达式")
-        return
-
-    rss_index = int(context.args[0]) - 1
-    if chat_id not in user_data or rss_index >= len(user_data[chat_id]["rss_sources"]):
-        await update.message.reply_text("无效的源编号，请检查已添加的 RSS 源。")
-        return
-
-    try:
-        indices = sorted([int(idx) - 1 for idx in context.args[1:]], reverse=True)
-    except ValueError:
-        await update.message.reply_text("请提供有效的正则表达式序号")
-        return
-
-    rss_source = user_data[chat_id]["rss_sources"][rss_index]
-    current_regex = rss_source.get("regex_keywords", [])
-
-    if not current_regex:
-        await update.message.reply_text("当前没有可删除的正则表达式")
-        return
-
-    if any(idx < 0 or idx >= len(current_regex) for idx in indices):
-        current_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(current_regex))
-        await update.message.reply_text(
-            f"存在无效的正则表达式序号。当前的正则表达式列表：\n{current_list}")
-        return
-
-    # 删除指定的正则表达式
-    removed_regex = [current_regex[i] for i in sorted(indices)]
-    for idx in indices:
-        current_regex.pop(idx)
-
-    save_user_data(user_data)
-
-    # 显示结果
-    if not current_regex:
-        updated_list = "当前没有正则表达式"
-    else:
-        updated_list = "\n".join(f"{i + 1}. {regex}" for i, regex in enumerate(current_regex))
-
-    removed_summary = "\n".join(f"• {regex}" for regex in removed_regex)
-    await update.message.reply_text(
-        f"已删除以下正则表达式：\n{removed_summary}\n\n"
-        f"当前的正则表达式列表：\n{updated_list}"
-    )
 
 # 添加用户到白名单
 async def add_user(update, context):
@@ -724,7 +690,6 @@ async def help_command(update, context):
         await update.message.reply_text("抱歉，您没有权限使用此 Bot。")
         return
 
-    # 修复缩进：
     help_text = (
         "欢迎使用我们的 Telegram Bot！以下是可用命令的列表：\n"
         "/start - 注册与启动服务\n"
@@ -732,21 +697,27 @@ async def help_command(update, context):
         "/add_rss - 添加一个新的 RSS 源\n"
         "/list_rss - 列出所有已添加的 RSS 源\n"
         "/list - 查看特定 RSS 源的详细信息\n"
-        "/add - 添加关键词到指定的 RSS 源\n"
-        "/add_regex - 添加正则表达式到指定的 RSS 源\n"
-        "  示例：\n"
-        "  /add 1 C - 添加包含'C'的关键词\n"
-        "  /add 1 +A+B - 添加同时包含'A'和'B'的关键词\n"
-        "  /add 1 +A-B - 添加包含'A'但不包含'B'的关键词\n"
-        "  /add_regex 1 \\d+GB - 添加匹配数字+GB的正则表达式\n"
-        "/rm - 从指定的 RSS 源移除关键词\n"
-        "/rm_regex - 从指定的 RSS 源移除正则表达式\n"
+        "/add - 添加关键词或正则表达式\n"
+        "  📝 关键词示例：\n"
+        "  /add 1 k dmit - 添加关键词\n"
+        "  /add 1 k vps hosting - 添加多个关键词\n"
+        "  🔍 正则示例：\n"
+        "  /add 1 r \\d+GB - 匹配数字+GB\n"
+        "  /add 1 r (VPS|服务器) - 匹配VPS或服务器\n"
+        "/rm - 删除关键词或正则表达式\n"
+        "  /rm 1 k 2 - 删除源1的第2个关键词\n"
+        "  /rm 1 r 1 - 删除源1的第1个正则表达式\n"
         "/rm_rss - 删除指定的 RSS 源\n"
         " \n"
         "管理员命令\n"
         "/add_user <用户ID> - 将用户添加到白名单(仅管理员可用)\n"
         "/group_verify <on/off> - 开启或关闭进群验证 (仅管理员可用)\n"
         "/whitelist <on/off> - 开启或关闭白名单模式(仅管理员可用)\n"
+        "\n"
+        "💡 类型说明：\n"
+        "k = 关键词（简单匹配）\n"
+        "r = 正则表达式（复杂匹配）\n"
+        "\n"
         "请依照指令格式进行操作，享受我们的服务！"
     )
 
@@ -777,8 +748,6 @@ def main():
     application.add_handler(CommandHandler("whitelist", toggle_whitelist))
     application.add_handler(CommandHandler("group_verify", toggle_group_verify))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("add_regex", add_regex))
-    application.add_handler(CommandHandler("rm_regex", rm_regex))
 
     # 使用环境变量中的更新间隔
     application.job_queue.run_repeating(check_new_posts, interval=UPDATE_INTERVAL, first=0)
