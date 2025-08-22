@@ -762,7 +762,9 @@ def main():
         print("错误：未设置 ROOT_ID 环境变量")
         return
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(20).build()
+    # 创建应用时启用 JobQueue
+    from telegram.ext import JobQueue
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).job_queue(JobQueue()).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("add_rss", add_rss))
@@ -783,5 +785,6 @@ def main():
 
     print(f"Bot 启动成功，更新间隔：{UPDATE_INTERVAL} 秒")
     application.run_polling()
+    
 if __name__ == "__main__":
     main()
